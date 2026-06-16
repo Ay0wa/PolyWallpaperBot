@@ -6,3 +6,6 @@ venv/
 data/dialogues.txt
 *.egg-info/
 .pytest_cache/
+
+github_deploy
+github_deploy.pub
