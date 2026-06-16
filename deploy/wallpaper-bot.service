@@ -1,0 +1,16 @@
+[Unit]
+Description=PolyWallpaper Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/PolyWallpaperBot
+EnvironmentFile=/opt/PolyWallpaperBot/.env
+ExecStart=/opt/PolyWallpaperBot/.venv/bin/python run_telegram.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
