@@ -1,101 +1,148 @@
-"""Поиск ответов по датасету dialogues.txt."""
+"""Поиск ответов по датасету dialogues.txt (индекс в SQLite — мало RAM)."""
 
-import os
+import sqlite3
 from pathlib import Path
 
 import nltk
 
-from src.config import DIALOGUES_PATH, SAMPLE_DIALOGUES_PATH
+from src.config import DIALOGUES_DB_PATH, DIALOGUES_PATH, SAMPLE_DIALOGUES_PATH
 from src.nlp import clear_phrase
 
-_dialogues_structured: dict[str, list[list[str]]] | None = None
+_db_conn: sqlite3.Connection | None = None
+MAX_PAIRS_PER_WORD = 1000
 
 
-def _resolve_dialogues_path() -> str | None:
-    base = Path(__file__).resolve().parent.parent
+def _base_dir() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _resolve_dialogues_path() -> Path | None:
     for rel in (DIALOGUES_PATH, SAMPLE_DIALOGUES_PATH):
-        path = base / rel
+        path = _base_dir() / rel
         if path.exists():
-            return str(path)
+            return path
     return None
 
 
-def _load_dialogues(path: str) -> list[list[str]]:
-    with open(path, encoding="utf-8", errors="ignore") as f:
-        content = f.read()
+def _db_path() -> Path:
+    return _base_dir() / DIALOGUES_DB_PATH
 
-    dialogues_str = content.split("\n\n")
-    dialogues = [d.split("\n")[:2] for d in dialogues_str]
 
-    filtered: list[list[str]] = []
+def _strip_replica(line: str) -> str:
+    if line.startswith("- "):
+        return line[2:]
+    return line
+
+
+def _iter_pairs(path: Path):
+    """Потоковое чтение пар вопрос-ответ без загрузки всего файла в память."""
     questions: set[str] = set()
+    block: list[str] = []
 
-    for dialogue in dialogues:
-        if len(dialogue) != 2:
-            continue
-        question, answer = dialogue
-        # Формат датасета: строки начинаются с "- "
-        if question.startswith("- "):
-            question = question[2:]
-        if answer.startswith("- "):
-            answer = answer[2:]
-        question = clear_phrase(question)
-        if question and question not in questions:
-            questions.add(question)
-            filtered.append([question, answer])
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if not line.strip():
+                if len(block) >= 2:
+                    question = clear_phrase(_strip_replica(block[0]))
+                    answer = _strip_replica(block[1])
+                    if question and question not in questions:
+                        questions.add(question)
+                        yield question, answer
+                block = []
+                continue
+            if len(block) < 2:
+                block.append(line)
 
-    return filtered
+        if len(block) >= 2:
+            question = clear_phrase(_strip_replica(block[0]))
+            answer = _strip_replica(block[1])
+            if question and question not in questions:
+                yield question, answer
 
 
-def _build_index(dialogues: list[list[str]]) -> dict[str, list[list[str]]]:
-    structured: dict[str, list[list[str]]] = {}
-    for question, answer in dialogues:
+def _build_index(txt_path: Path, db_path: Path) -> None:
+    """Строит SQLite-индекс потоково (как в методичке: до 1000 пар на слово)."""
+    if db_path.exists():
+        db_path.unlink()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE word_index (word TEXT NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL)"
+    )
+    conn.execute("CREATE INDEX idx_word ON word_index(word)")
+
+    word_counts: dict[str, int] = {}
+    batch: list[tuple[str, str, str]] = []
+    batch_size = 5000
+
+    for question, answer in _iter_pairs(txt_path):
         for word in set(question.split()):
             if len(word) < 2:
                 continue
-            structured.setdefault(word, []).append([question, answer])
+            count = word_counts.get(word, 0)
+            if count >= MAX_PAIRS_PER_WORD:
+                continue
+            batch.append((word, question, answer))
+            word_counts[word] = count + 1
+            if len(batch) >= batch_size:
+                conn.executemany("INSERT INTO word_index VALUES (?, ?, ?)", batch)
+                batch.clear()
 
-    cut: dict[str, list[list[str]]] = {}
-    for word, pairs in structured.items():
-        pairs.sort(key=lambda p: len(p[0]))
-        cut[word] = pairs[:1000]
-    return cut
+    if batch:
+        conn.executemany("INSERT INTO word_index VALUES (?, ?, ?)", batch)
+    conn.commit()
+    conn.close()
 
 
 def init_dialogues() -> bool:
-    """Загружает датасет диалогов. Возвращает True, если файл найден."""
-    global _dialogues_structured
-    path = _resolve_dialogues_path()
-    if not path:
-        _dialogues_structured = {}
+    """Загружает или строит SQLite-индекс. Возвращает True, если датасет найден."""
+    global _db_conn
+
+    txt_path = _resolve_dialogues_path()
+    if txt_path is None:
         return False
-    dialogues = _load_dialogues(path)
-    _dialogues_structured = _build_index(dialogues)
+
+    db_path = _db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not db_path.exists() or db_path.stat().st_mtime < txt_path.stat().st_mtime:
+        _build_index(txt_path, db_path)
+
+    _db_conn = sqlite3.connect(db_path, check_same_thread=False)
+    _db_conn.execute("PRAGMA query_only=ON")
     return True
 
 
+def _get_conn() -> sqlite3.Connection | None:
+    global _db_conn
+    if _db_conn is None and not init_dialogues():
+        return None
+    return _db_conn
+
+
 def generate_answer(replica: str) -> str | None:
-    global _dialogues_structured
-    if _dialogues_structured is None:
-        init_dialogues()
-    if not _dialogues_structured:
+    conn = _get_conn()
+    if conn is None:
         return None
 
     replica = clear_phrase(replica)
     if not replica:
         return None
 
-    words = set(replica.split())
     seen: set[str] = set()
-    mini_dataset: list[list[str]] = []
+    mini_dataset: list[tuple[str, str]] = []
 
-    for word in words:
-        pairs = _dialogues_structured.get(word, [])
-        for pair in pairs:
-            key = pair[0]
-            if key not in seen:
-                seen.add(key)
-                mini_dataset.append(pair)
+    for word in set(replica.split()):
+        if len(word) < 2:
+            continue
+        for question, answer in conn.execute(
+            "SELECT question, answer FROM word_index WHERE word = ?", (word,)
+        ):
+            if question not in seen:
+                seen.add(question)
+                mini_dataset.append((question, answer))
 
     answers: list[tuple[float, str, str]] = []
     for question, answer in mini_dataset:

@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 data/dialogues.txt
+data/dialogues.idx
 *.egg-info/
 .pytest_cache/
 

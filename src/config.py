@@ -333,3 +333,4 @@ PRODUCT_THEME_MAP = {
 HIST_THEME_LEN = 10
 DIALOGUES_PATH = "data/dialogues.txt"
 SAMPLE_DIALOGUES_PATH = "data/dialogues_sample.txt"
+DIALOGUES_DB_PATH = "data/dialogues.idx"
