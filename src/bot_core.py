@@ -57,6 +57,7 @@ def bot(replica: str) -> str:
     answer = generate_answer(replica)
     if answer:
         stats["generate"] += 1
+        answer = _enrich_with_sentiment(answer, replica)
         return maybe_inject_ad(answer, intent)
 
     stats["failure"] += 1
